@@ -1,8 +1,3 @@
-# Copyright (c) Facebook, Inc. and its affiliates.
-#
-# This source code is licensed under the MIT license found in the
-# LICENSE file in the root directory of this source tree.
-
 import ast
 import collections
 import contextlib
@@ -31,7 +26,7 @@ def save_checkpoint(cfg: CheckpointConfig, trainer, epoch_itr, val_loss):
     from fairseq import meters
 
     # only one worker should attempt to create the required dir
-    if trainer.data_parallel_rank == 0:
+    if cfg.distributed_rank == 0:
         os.makedirs(cfg.save_dir, exist_ok=True)
 
     prev_best = getattr(save_checkpoint, "best", val_loss)
@@ -44,7 +39,7 @@ def save_checkpoint(cfg: CheckpointConfig, trainer, epoch_itr, val_loss):
 
     trainer.consolidate_optimizer()
 
-    if not trainer.should_save_checkpoint_on_current_rank:
+    if not trainer.is_data_parallel_master:
         return
 
     write_timer = meters.StopwatchMeter()
@@ -59,7 +54,7 @@ def save_checkpoint(cfg: CheckpointConfig, trainer, epoch_itr, val_loss):
     def is_better(a, b):
         return a >= b if cfg.maximize_best_checkpoint_metric else a <= b
 
-    suffix = trainer.checkpoint_suffix
+    suffix = cfg.checkpoint_suffix or ""
     checkpoint_conds = collections.OrderedDict()
     checkpoint_conds["checkpoint{}{}.pt".format(epoch, suffix)] = (
         end_of_epoch and not cfg.no_epoch_checkpoints and epoch % cfg.save_interval == 0
@@ -165,7 +160,7 @@ def load_checkpoint(cfg: CheckpointConfig, trainer, **passthrough_args):
             " or reset_lr_scheduler or reset_meters or reset_dataloader"
         )
 
-    suffix = trainer.checkpoint_suffix
+    suffix = cfg.checkpoint_suffix
     if (
         cfg.restore_file == "checkpoint_last.pt"
     ):  # default value of restore_file is 'checkpoint_last.pt'
@@ -190,7 +185,7 @@ def load_checkpoint(cfg: CheckpointConfig, trainer, **passthrough_args):
                 raise ValueError(
                     f"--funetune-from-model {cfg.finetune_from_model} does not exist"
                 )
-    elif suffix is not None:
+    elif cfg.model_parallel_size > 1:
         checkpoint_path = cfg.restore_file.replace(".pt", suffix + ".pt")
     else:
         checkpoint_path = cfg.restore_file
@@ -382,7 +377,7 @@ def load_model_ensemble_and_task(
             # reset state so it gets loaded for the next model in ensemble
             state = None
 
-        ensemble.append(model)
+        ensemble.append(model.train())
     return ensemble, cfg, task
 
 
@@ -405,8 +400,8 @@ def checkpoint_paths(path, pattern=r"checkpoint(\d+)\.pt"):
     return [os.path.join(path, x[1]) for x in sorted(entries, reverse=True)]
 
 
-def torch_persistent_save(obj, filename, async_write: bool = False):
-    if async_write:
+def torch_persistent_save(cfg: CheckpointConfig, obj, filename):
+    if cfg.write_checkpoints_asynchronously:
         with PathManager.opena(filename, "wb") as f:
             _torch_persistent_save(obj, f)
     else:
@@ -432,6 +427,61 @@ def _torch_persistent_save(obj, f):
         except Exception:
             if i == 2:
                 logger.error(traceback.format_exc())
+
+
+def save_state(
+    filename,
+    cfg: FairseqConfig,
+    model_state_dict,
+    criterion,
+    optimizer,
+    lr_scheduler,
+    num_updates,
+    optim_history=None,
+    extra_state=None,
+    task=None,
+    **kwargs,
+):
+    from fairseq import utils
+
+    if optim_history is None:
+        optim_history = []
+    if extra_state is None:
+        extra_state = {}
+    state_dict = {
+        "cfg": OmegaConf.to_container(cfg) if OmegaConf.is_config(cfg) else cfg,
+        "args": kwargs.get("args", None),
+        "model": model_state_dict or {},
+        "optimizer_history": optim_history
+        + [
+            {
+                "criterion_name": criterion.__class__.__name__,
+                "optimizer_name": optimizer.__class__.__name__,
+                "lr_scheduler_state": lr_scheduler.state_dict(),
+                "num_updates": num_updates,
+            }
+        ],
+        "extra_state": extra_state,
+        "task_state": task.state_dict() if task is not None else {},
+    }
+    if utils.has_parameters(criterion):
+        state_dict["criterion"] = criterion.state_dict()
+
+    if cfg is None:
+        cfg = state_dict["args"]
+        assert cfg is not None, "must provide cfg or args"
+
+    if isinstance(cfg, DictConfig):
+        no_save_optimizer_state = cfg.checkpoint.no_save_optimizer_state
+    else:
+        no_save_optimizer_state = cfg.no_save_optimizer_state
+    if not no_save_optimizer_state:
+        state_dict["last_optimizer_state"] = optimizer.state_dict()
+
+    # keep everything on CPU
+    state_dict = utils.move_to_cpu(state_dict)
+
+    torch_persistent_save(cfg.checkpoint, state_dict, filename)
 
 
 def _upgrade_state_dict(state):
@@ -474,7 +524,7 @@ def _upgrade_state_dict(state):
     if "num_updates" not in state["optimizer_history"][-1]:
         state["optimizer_history"][-1]["num_updates"] = 0
     # old model checkpoints may not have separate source/target positions
-    if "args" in state and hasattr(state["args"], "max_positions") and not hasattr(
+    if hasattr(state["args"], "max_positions") and not hasattr(
         state["args"], "max_source_positions"
     ):
         state["args"].max_source_positions = state["args"].max_positions

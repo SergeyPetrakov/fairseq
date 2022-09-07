@@ -1,7 +1,3 @@
-# Copyright (c) Facebook, Inc. and its affiliates.
-#
-# This source code is licensed under the MIT license found in the
-# LICENSE file in the root directory of this source tree.
 """
 Base classes for various fairseq models.
 """
@@ -25,13 +21,6 @@ from torch import Tensor
 
 
 logger = logging.getLogger(__name__)
-
-
-def check_type(module, expected_type):
-    if hasattr(module, "unwrapped_module"):
-        assert isinstance(module.unwrapped_module, expected_type)
-    else:
-        assert isinstance(module, expected_type)
 
 
 class BaseFairseqModel(nn.Module):
@@ -210,27 +199,23 @@ class BaseFairseqModel(nn.Module):
         apply_make_generation_fast_(self, "")
 
         def train(mode=True):
-            if mode:
-                raise RuntimeError("cannot train after make_generation_fast")
+            #self.train = train
+            self.train()
 
-        # this model should no longer be used for training
-        self.eval()
-        self.train = train
+#     def prepare_for_onnx_export_(self, **kwargs):
+#         """Make model exportable via ONNX trace."""
+#         seen = set()
 
-    def prepare_for_onnx_export_(self, **kwargs):
-        """Make model exportable via ONNX trace."""
-        seen = set()
+#         def apply_prepare_for_onnx_export_(module):
+#             if (
+#                 module != self
+#                 and hasattr(module, "prepare_for_onnx_export_")
+#                 and module not in seen
+#             ):
+#                 seen.add(module)
+#                 module.prepare_for_onnx_export_(**kwargs)
 
-        def apply_prepare_for_onnx_export_(module):
-            if (
-                module != self
-                and hasattr(module, "prepare_for_onnx_export_")
-                and module not in seen
-            ):
-                seen.add(module)
-                module.prepare_for_onnx_export_(**kwargs)
-
-        self.apply(apply_prepare_for_onnx_export_)
+#         self.apply(apply_prepare_for_onnx_export_)
 
     @classmethod
     def from_pretrained(
@@ -291,9 +276,8 @@ class FairseqEncoderDecoderModel(BaseFairseqModel):
 
         self.encoder = encoder
         self.decoder = decoder
-
-        check_type(self.encoder, FairseqEncoder)
-        check_type(self.decoder, FairseqDecoder)
+        assert isinstance(self.encoder, FairseqEncoder)
+        assert isinstance(self.decoder, FairseqDecoder)
 
     def forward(self, src_tokens, src_lengths, prev_output_tokens, **kwargs):
         """
@@ -373,8 +357,8 @@ class FairseqMultiModel(BaseFairseqModel):
         assert encoders.keys() == decoders.keys()
         self.keys = list(encoders.keys())
         for key in self.keys:
-            check_type(encoders[key], FairseqEncoder)
-            check_type(decoders[key], FairseqDecoder)
+            assert isinstance(encoders[key], FairseqEncoder)
+            assert isinstance(decoders[key], FairseqDecoder)
 
         self.models = nn.ModuleDict(
             {
@@ -477,7 +461,7 @@ class FairseqLanguageModel(BaseFairseqModel):
     def __init__(self, decoder):
         super().__init__()
         self.decoder = decoder
-        check_type(self.decoder, FairseqDecoder)
+        assert isinstance(self.decoder, FairseqDecoder)
 
     def forward(self, src_tokens, **kwargs):
         """
@@ -538,7 +522,7 @@ class FairseqEncoderModel(BaseFairseqModel):
     def __init__(self, encoder):
         super().__init__()
         self.encoder = encoder
-        check_type(self.encoder, FairseqEncoder)
+        assert isinstance(self.encoder, FairseqEncoder)
 
     def forward(self, src_tokens, src_lengths, **kwargs):
         """

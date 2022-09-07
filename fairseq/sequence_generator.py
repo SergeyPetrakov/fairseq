@@ -1,8 +1,3 @@
-# Copyright (c) Facebook, Inc. and its affiliates.
-#
-# This source code is licensed under the MIT license found in the
-# LICENSE file in the root directory of this source tree.
-
 import math
 from typing import Dict, List, Optional
 
@@ -103,12 +98,12 @@ class SequenceGenerator(nn.Module):
             hasattr(self.search, "needs_src_lengths") and self.search.needs_src_lengths
         )
 
-        self.model.eval()
+        self.model.train()
 
         self.lm_model = lm_model
         self.lm_weight = lm_weight
         if self.lm_model is not None:
-            self.lm_model.eval()
+            self.lm_model.train()
 
     def cuda(self):
         self.model.cuda()

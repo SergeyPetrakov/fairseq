@@ -22,29 +22,25 @@ logger = logging.getLogger(__name__)
 
 class BARTHubInterface(GeneratorHubInterface):
     """A simple PyTorch Hub interface to BART.
-
-    Usage: https://github.com/pytorch/fairseq/tree/master/examples/bart
+    Usage: https://github.com/pytorch/fairseq/tree/main/examples/bart
     """
 
     def __init__(self, cfg, task, model):
         super().__init__(cfg, task, [model])
         self.model = self.models[0]
+        self.model.train()
 
     def encode(
         self, sentence: str, *addl_sentences, no_separator=True
     ) -> torch.LongTensor:
         """
         BPE-encode a sentence (or multiple sentences).
-
         Every sequence begins with a beginning-of-sentence (`<s>`) symbol.
         Every sentence ends with an end-of-sentence (`</s>`).
-
         Example (single sentence): `<s> a b c </s>`
         Example (sentence pair): `<s> d e f </s> 1 2 3 </s>`
-
         The BPE encoding follows GPT-2. One subtle detail is that the GPT-2 BPE
         requires leading spaces. For example::
-
             >>> bart.encode('Hello world').tolist()
             [0, 31414, 232, 2]
             >>> bart.encode(' world').tolist()
@@ -52,6 +48,7 @@ class BARTHubInterface(GeneratorHubInterface):
             >>> bart.encode('world').tolist()
             [0, 8331, 2]
         """
+        self.model.train()
         tokens = self.bpe.encode(sentence)
         if len(tokens.split(" ")) > min(self.max_positions) - 2:
             tokens = " ".join(tokens.split(" ")[: min(self.max_positions) - 2])
@@ -63,6 +60,7 @@ class BARTHubInterface(GeneratorHubInterface):
         return tokens.long()
 
     def decode(self, tokens: torch.LongTensor):
+        self.model.train()
         assert tokens.dim() == 1
         tokens = tokens.cpu().numpy()
         if tokens[0] == self.task.source_dictionary.bos():
@@ -79,6 +77,7 @@ class BARTHubInterface(GeneratorHubInterface):
 
     def _build_sample(self, src_tokens: List[torch.LongTensor]):
         # assert torch.is_tensor(src_tokens)
+        self.model.train()
         dataset = self.task.build_dataset_for_inference(
             src_tokens,
             [x.numel() for x in src_tokens],
@@ -95,13 +94,23 @@ class BARTHubInterface(GeneratorHubInterface):
         skip_invalid_size_inputs=False,
         **kwargs
     ) -> List[List[Dict[str, torch.Tensor]]]:
+        print("start generate function")
+        print("self.model.training: ", self.model.training)
+        print("self.model.encoder.dropout_module.training: ", self.model.encoder.dropout_module.training)
+        
+        self.model.train()
+        
+        print("after self.model.train() inside generate")
+        print("self.model.training: ", self.model.training)
+        print("self.model.encoder.dropout_module.training: ", self.model.encoder.dropout_module.training)
+        
         inference_step_args = inference_step_args or {}
         if "prefix_tokens" in inference_step_args:
             raise NotImplementedError("prefix generation not implemented for BART")
         res = []
         for batch in self._build_batches(tokenized_sentences, skip_invalid_size_inputs):
-            src_tokens = batch['net_input']['src_tokens']
-            inference_step_args["prefix_tokens"] =src_tokens.new_full(
+            src_tokens = batch["net_input"]["src_tokens"]
+            inference_step_args["prefix_tokens"] = src_tokens.new_full(
                 (src_tokens.size(0), 1), fill_value=self.task.source_dictionary.bos()
             ).to(device=self.device)
             results = super().generate(
@@ -111,12 +120,19 @@ class BARTHubInterface(GeneratorHubInterface):
                 skip_invalid_size_inputs=skip_invalid_size_inputs,
                 **kwargs
             )
-            res.extend(results)
+            for id, hypos in zip(batch["id"].tolist(), results):
+                res.append((id, hypos))
+        res = [hypos for _, hypos in sorted(res, key=lambda x: x[0])]
+        print("before return generate function")
+        print("self.model.training: ", self.model.training)
+        print("self.model.encoder.dropout_module.training: ", self.model.encoder.dropout_module.training)
+        
         return res
 
     def extract_features(
         self, tokens: torch.LongTensor, return_all_hiddens: bool = False
     ) -> torch.Tensor:
+        self.model.train()
         if tokens.dim() == 1:
             tokens = tokens.unsqueeze(0)
         if tokens.size(-1) > min(self.model.max_positions()):
@@ -156,6 +172,7 @@ class BARTHubInterface(GeneratorHubInterface):
         )
 
     def predict(self, head: str, tokens: torch.LongTensor, return_logits: bool = False):
+        self.model.train()
         if tokens.dim() == 1:
             tokens = tokens.unsqueeze(0)
         features = self.extract_features(tokens.to(device=self.device))
@@ -175,32 +192,36 @@ class BARTHubInterface(GeneratorHubInterface):
         match_source_len: bool = True,
         **generate_kwargs
     ):
-        masked_token = '<mask>'
+        self.model.train()
+        masked_token = "<mask>"
         batch_tokens = []
         for masked_input in masked_inputs:
-            assert masked_token in masked_input, \
-                "please add one {} token for the input".format(masked_token)
+            assert (
+                masked_token in masked_input
+            ), "please add one {} token for the input".format(masked_token)
 
             text_spans = masked_input.split(masked_token)
-            text_spans_bpe = (' {0} '.format(masked_token)).join(
-                [self.bpe.encode(text_span.rstrip()) for text_span in text_spans]
-            ).strip()
+            text_spans_bpe = (
+                (" {0} ".format(masked_token))
+                .join([self.bpe.encode(text_span.rstrip()) for text_span in text_spans])
+                .strip()
+            )
             tokens = self.task.source_dictionary.encode_line(
-                '<s> ' + text_spans_bpe + ' </s>',
+                "<s> " + text_spans_bpe + " </s>",
                 append_eos=False,
                 add_if_not_exist=False,
             ).long()
             batch_tokens.append(tokens)
 
         # ensure beam size is at least as big as topk
-        generate_kwargs['beam'] = max(
+        generate_kwargs["beam"] = max(
             topk,
-            generate_kwargs.get('beam', -1),
+            generate_kwargs.get("beam", -1),
         )
-        generate_kwargs['match_source_len'] = match_source_len
+        generate_kwargs["match_source_len"] = match_source_len
         batch_hypos = self.generate(batch_tokens, **generate_kwargs)
 
         return [
-            [(self.decode(hypo['tokens']), hypo['score']) for hypo in hypos[:topk]]
+            [(self.decode(hypo["tokens"]), hypo["score"]) for hypo in hypos[:topk]]
             for hypos in batch_hypos
         ]

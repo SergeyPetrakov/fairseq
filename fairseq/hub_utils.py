@@ -1,9 +1,3 @@
-#!/usr/bin/env python3 -u
-# Copyright (c) Facebook, Inc. and its affiliates.
-#
-# This source code is licensed under the MIT license found in the
-# LICENSE file in the root directory of this source tree.
-
 import argparse
 import copy
 import logging
@@ -11,11 +5,11 @@ import os
 from typing import Any, Dict, Iterator, List
 
 import torch
-from fairseq import utils
-from fairseq.data import encoders
 from omegaconf import open_dict
 from torch import nn
 
+from fairseq import utils
+from fairseq.data import encoders
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +93,7 @@ class GeneratorHubInterface(nn.Module):
         # optimize model for generation
         for model in self.models:
             model.prepare_for_inference_(cfg)
+            model.train()
 
         # Load alignment dictionary for unknown word replacement
         # (None if no unknown word replacement, empty if no path to align dictionary)
@@ -126,17 +121,31 @@ class GeneratorHubInterface(nn.Module):
     def sample(
         self, sentences: List[str], beam: int = 1, verbose: bool = False, **kwargs
     ) -> List[str]:
+        self.model.train()
         if isinstance(sentences, str):
             return self.sample([sentences], beam=beam, verbose=verbose, **kwargs)[0]
         tokenized_sentences = [self.encode(sentence) for sentence in sentences]
         batched_hypos = self.generate(tokenized_sentences, beam, verbose, **kwargs)
         return [self.decode(hypos[0]["tokens"]) for hypos in batched_hypos]
 
-    def score(self, sentences: List[str], **kwargs):
+    def score(
+        self, sentences: List[str], replace_newline_with_eos: bool = False, **kwargs
+    ):
+        self.model.train()
         if isinstance(sentences, str):
-            return self.score([sentences], **kwargs)[0]
+            return self.score(
+                [sentences], replace_newline_with_eos=replace_newline_with_eos, **kwargs
+            )[0]
+
+        def encode(sentence):
+            self.model.train()
+            if replace_newline_with_eos:
+                return torch.cat([self.encode(line) for line in sentence.splitlines()])
+            else:
+                return self.encode(sentence)
+
         # NOTE: this doesn't support translation tasks currently
-        tokenized_sentences = [self.encode(sentence) for sentence in sentences]
+        tokenized_sentences = [encode(sentence) for sentence in sentences]
         return [
             hypos[0]
             for hypos in self.generate(
@@ -151,26 +160,31 @@ class GeneratorHubInterface(nn.Module):
         verbose: bool = False,
         skip_invalid_size_inputs=False,
         inference_step_args=None,
+        prefix_allowed_tokens_fn=None,
         **kwargs
     ) -> List[List[Dict[str, torch.Tensor]]]:
+        
+        self.model.train()
         if torch.is_tensor(tokenized_sentences) and tokenized_sentences.dim() == 1:
             return self.generate(
                 tokenized_sentences.unsqueeze(0), beam=beam, verbose=verbose, **kwargs
             )[0]
-
+        
         # build generator using current args as well as any kwargs
         gen_args = copy.deepcopy(self.cfg.generation)
         with open_dict(gen_args):
             gen_args.beam = beam
             for k, v in kwargs.items():
-                if k != "prefix_allowed_tokens_fn":
-                    setattr(gen_args, k, v)
+                setattr(gen_args, k, v)
+        
+        
         generator = self.task.build_generator(
             self.models,
             gen_args,
-            prefix_allowed_tokens_fn=kwargs.get("prefix_allowed_tokens_fn", None),
+            prefix_allowed_tokens_fn=prefix_allowed_tokens_fn,
         )
         
+
         inference_step_args = inference_step_args or {}
         results = []
         for batch in self._build_batches(tokenized_sentences, skip_invalid_size_inputs):
@@ -218,34 +232,42 @@ class GeneratorHubInterface(nn.Module):
                                 )
                             )
                         )
+        
+        
         return outputs
 
     def encode(self, sentence: str) -> torch.LongTensor:
+        self.model.train()
         sentence = self.tokenize(sentence)
         sentence = self.apply_bpe(sentence)
         return self.binarize(sentence)
 
     def decode(self, tokens: torch.LongTensor) -> str:
+        self.model.train()
         sentence = self.string(tokens)
         sentence = self.remove_bpe(sentence)
         return self.detokenize(sentence)
 
     def tokenize(self, sentence: str) -> str:
+        self.model.train()
         if self.tokenizer is not None:
             sentence = self.tokenizer.encode(sentence)
         return sentence
 
     def detokenize(self, sentence: str) -> str:
+        self.model.train()
         if self.tokenizer is not None:
             sentence = self.tokenizer.decode(sentence)
         return sentence
 
     def apply_bpe(self, sentence: str) -> str:
+        self.model.train()
         if self.bpe is not None:
             sentence = self.bpe.encode(sentence)
         return sentence
 
     def remove_bpe(self, sentence: str) -> str:
+        self.model.train()
         if self.bpe is not None:
             sentence = self.bpe.decode(sentence)
         return sentence
@@ -276,14 +298,17 @@ class BPEHubInterface(object):
 
     def __init__(self, bpe, **kwargs):
         super().__init__()
+        self.model.train()
         args = argparse.Namespace(bpe=bpe, **kwargs)
         self.bpe = encoders.build_bpe(args)
         assert self.bpe is not None
 
     def encode(self, sentence: str) -> str:
+        self.model.train()
         return self.bpe.encode(sentence)
 
     def decode(self, sentence: str) -> str:
+        self.model.train()
         return self.bpe.decode(sentence)
 
 
@@ -292,12 +317,15 @@ class TokenizerHubInterface(object):
 
     def __init__(self, tokenizer, **kwargs):
         super().__init__()
+        self.model.train()
         args = argparse.Namespace(tokenizer=tokenizer, **kwargs)
         self.tokenizer = encoders.build_tokenizer(args)
         assert self.tokenizer is not None
 
     def encode(self, sentence: str) -> str:
+        self.model.train()
         return self.tokenizer.encode(sentence)
 
     def decode(self, sentence: str) -> str:
+        self.model.train()
         return self.tokenizer.decode(sentence)

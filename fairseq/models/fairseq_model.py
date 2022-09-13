@@ -1,3 +1,7 @@
+# Copyright (c) Facebook, Inc. and its affiliates.
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
 """
 Base classes for various fairseq models.
 """
@@ -199,23 +203,26 @@ class BaseFairseqModel(nn.Module):
         apply_make_generation_fast_(self, "")
 
         def train(mode=True):
-            #self.train = train
-            self.train()
+            self.train = train
+            
+        
+        self.train()
+        self.train = train
 
-#     def prepare_for_onnx_export_(self, **kwargs):
-#         """Make model exportable via ONNX trace."""
-#         seen = set()
+    def prepare_for_onnx_export_(self, **kwargs):
+        """Make model exportable via ONNX trace."""
+        seen = set()
 
-#         def apply_prepare_for_onnx_export_(module):
-#             if (
-#                 module != self
-#                 and hasattr(module, "prepare_for_onnx_export_")
-#                 and module not in seen
-#             ):
-#                 seen.add(module)
-#                 module.prepare_for_onnx_export_(**kwargs)
+        def apply_prepare_for_onnx_export_(module):
+            if (
+                module != self
+                and hasattr(module, "prepare_for_onnx_export_")
+                and module not in seen
+            ):
+                seen.add(module)
+                module.prepare_for_onnx_export_(**kwargs)
 
-#         self.apply(apply_prepare_for_onnx_export_)
+        self.apply(apply_prepare_for_onnx_export_)
 
     @classmethod
     def from_pretrained(

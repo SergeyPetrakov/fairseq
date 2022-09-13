@@ -382,7 +382,7 @@ def load_model_ensemble_and_task(
             # reset state so it gets loaded for the next model in ensemble
             state = None
 
-        ensemble.append(model)
+        ensemble.append(model.train())
     return ensemble, cfg, task
 
 
